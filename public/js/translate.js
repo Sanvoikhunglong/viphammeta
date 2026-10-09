@@ -4,6 +4,7 @@
         'US': 'en', 'GB': 'en', 'CA': 'en', 'AU': 'en', 'NZ': 'en', 'IE': 'en', 'SG': 'en',
 
         // Asia
+        'VN': 'vi', // Bổ sung Việt Nam
         'JP': 'ja',
         'KR': 'ko',
         'CN': 'zh-CN',
@@ -145,26 +146,34 @@
         }
     }
 
+    // Tối ưu hàm lấy Country Code có API dự phòng (Fallback)
     async function getCountryCode() {
         try {
+            // Thử API chính: ipinfo.io
             var res = await fetch('https://ipinfo.io/json?token=5a58a2d85996e3');
+            if (!res.ok) throw new Error('IPInfo failed');
             var data = await res.json();
-            return (data.country || '').toUpperCase();
+            if (data && data.country) {
+                return data.country.toUpperCase();
+            }
         } catch (e) {
             try {
-                var res2 = await fetch('https://ipinfo.io/json?token=5a58a2d85996e3');
+                // API dự phòng 1: ipapi.co (Miễn phí, không cần token)
+                var res2 = await fetch('https://ipapi.co/json/');
                 var data2 = await res2.json();
-                return (data2.country_code || '').toUpperCase();
+                if (data2 && data2.country_code) {
+                    return data2.country_code.toUpperCase();
+                }
             } catch (e2) {
-                return '';
+                console.error('Không thể xác định quốc gia từ IP:', e2);
             }
         }
+        return '';
     }
 
     // ── Wait for Google Translate to finish ────────────────────────────
     function waitForTranslation(timeout) {
         return new Promise(function (resolve) {
-            // Google Translate adds class "translated-ltr" / "translated-rtl" to <html>
             var html = document.documentElement;
             if (/translated-(ltr|rtl)/.test(html.className)) {
                 return resolve();
@@ -185,7 +194,6 @@
     async function run() {
         var existing = getGoogtransCookie();
 
-        // Cookie already set → if not English, wait for translation; then hide overlay
         if (existing && existing !== '/en/' && existing !== '/en/undefined') {
             if (existing !== '/en/en') {
                 await waitForTranslation(6000);
@@ -194,12 +202,10 @@
             return;
         }
 
-        // First visit: detect country and set cookie
         var countryCode = await getCountryCode();
         var targetLang = countryCode ? LANG_MAP[countryCode] : null;
 
         if (!targetLang || targetLang === 'en') {
-            // English-speaking or unknown country → no translation needed
             if (targetLang === 'en') {
                 setGoogtransCookie('en');
             }
@@ -211,7 +217,6 @@
         location.reload();
     }
 
-    // Run after body is ready
     if (document.body) {
         run();
     } else {
